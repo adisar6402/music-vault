@@ -18,6 +18,7 @@ import {
   storeAudioFile,
 } from "@/lib/audioStorage";
 import { getGradientColors } from "@/lib/gradients";
+import { WebAudioPlayer } from "@/lib/webAudio";
 
 export type Mood = "all" | "chill" | "focus" | "workout" | "sleep";
 export type RepeatMode = "none" | "one" | "all";
@@ -111,25 +112,25 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
   const [currentMood, setCurrentMood] = useState<Mood>("all");
   const [isLoading, setIsLoading] = useState(false);
 
-  const soundRef = useRef<Audio.Sound | null>(null);
+  // Refs for current values (avoids stale closures in callbacks)
   const queueRef = useRef<Song[]>([]);
   const queueIndexRef = useRef(0);
   const repeatRef = useRef<RepeatMode>("none");
   const shuffleRef = useRef(false);
+  const volumeRef = useRef(1);
 
-  useEffect(() => {
-    queueRef.current = queue;
-  }, [queue]);
-  useEffect(() => {
-    queueIndexRef.current = queueIndex;
-  }, [queueIndex]);
-  useEffect(() => {
-    repeatRef.current = repeat;
-  }, [repeat]);
-  useEffect(() => {
-    shuffleRef.current = shuffle;
-  }, [shuffle]);
+  // Audio backend refs
+  const nativeSoundRef = useRef<Audio.Sound | null>(null);
+  const webPlayerRef = useRef<WebAudioPlayer | null>(null);
+  const loadAndPlayRef = useRef<((song: Song) => Promise<void>) | null>(null);
 
+  useEffect(() => { queueRef.current = queue; }, [queue]);
+  useEffect(() => { queueIndexRef.current = queueIndex; }, [queueIndex]);
+  useEffect(() => { repeatRef.current = repeat; }, [repeat]);
+  useEffect(() => { shuffleRef.current = shuffle; }, [shuffle]);
+  useEffect(() => { volumeRef.current = volume; }, [volume]);
+
+  // Init audio mode on native
   useEffect(() => {
     if (Platform.OS !== "web") {
       Audio.setAudioModeAsync({
@@ -142,6 +143,7 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
+  // Load persisted data
   useEffect(() => {
     (async () => {
       const [s, p] = await Promise.all([
@@ -153,97 +155,132 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
     })();
   }, []);
 
-  const unloadSound = useCallback(async () => {
-    if (soundRef.current) {
-      try {
-        await soundRef.current.unloadAsync();
-      } catch {}
-      soundRef.current = null;
+  const unloadAudio = useCallback(async () => {
+    if (Platform.OS === "web") {
+      if (webPlayerRef.current) {
+        await webPlayerRef.current.unload();
+      }
+    } else {
+      if (nativeSoundRef.current) {
+        try { await nativeSoundRef.current.unloadAsync(); } catch {}
+        nativeSoundRef.current = null;
+      }
     }
   }, []);
 
-  const onPlaybackStatus = useCallback(
-    (status: AVPlaybackStatus) => {
-      if (!status.isLoaded) return;
-      setPosition(status.positionMillis ?? 0);
-      if (status.durationMillis) setDuration(status.durationMillis);
-      setIsPlaying(status.isPlaying);
+  const handleSongFinish = useCallback(() => {
+    const mode = repeatRef.current;
+    const q = queueRef.current;
+    const idx = queueIndexRef.current;
 
-      if (status.didJustFinish) {
-        const mode = repeatRef.current;
-        const q = queueRef.current;
-        const idx = queueIndexRef.current;
-
-        if (mode === "one") {
-          soundRef.current?.replayAsync().catch(() => {});
-          return;
-        }
-
-        const nextIdx = shuffleRef.current
-          ? Math.floor(Math.random() * q.length)
-          : idx + 1;
-
-        if (nextIdx < q.length) {
-          setQueueIndex(nextIdx);
-          const next = q[nextIdx];
-          setCurrentSong(next);
-          loadAndPlay(next);
-        } else if (mode === "all" && q.length > 0) {
-          setQueueIndex(0);
-          const first = q[0];
-          setCurrentSong(first);
-          loadAndPlay(first);
-        } else {
-          setIsPlaying(false);
-          setPosition(0);
-        }
+    if (mode === "one") {
+      if (Platform.OS === "web") {
+        webPlayerRef.current?.replay().catch(() => {});
+      } else {
+        nativeSoundRef.current?.replayAsync().catch(() => {});
       }
-    },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    []
-  );
+      return;
+    }
 
-  const loadAndPlay = useCallback(
-    async (song: Song) => {
-      await unloadSound();
+    const nextIdx = shuffleRef.current
+      ? Math.floor(Math.random() * q.length)
+      : idx + 1;
+
+    if (nextIdx < q.length) {
+      const next = q[nextIdx];
+      setQueueIndex(nextIdx);
+      setCurrentSong(next);
+      loadAndPlayRef.current?.(next);
+    } else if (mode === "all" && q.length > 0) {
+      const first = q[0];
+      setQueueIndex(0);
+      setCurrentSong(first);
+      loadAndPlayRef.current?.(first);
+    } else {
+      setIsPlaying(false);
       setPosition(0);
-      setDuration(0);
+    }
+  }, []);
 
-      const playableUri = await getPlayableUri(song.id, song.uri);
-      if (!playableUri) return;
+  const loadAndPlay = useCallback(async (song: Song) => {
+    await unloadAudio();
+    setPosition(0);
+    setDuration(0);
+    setIsPlaying(false);
 
+    const playableUri = await getPlayableUri(song.id, song.uri);
+    if (!playableUri) {
+      console.warn("[MusicVault] Could not resolve playable URI for", song.id);
+      return;
+    }
+
+    if (Platform.OS === "web") {
+      if (!webPlayerRef.current) {
+        webPlayerRef.current = new WebAudioPlayer();
+      }
+      await webPlayerRef.current.load(playableUri, (status) => {
+        setPosition(status.positionMillis);
+        if (status.durationMillis > 0) setDuration(status.durationMillis);
+        setIsPlaying(status.isPlaying);
+        if (status.didJustFinish) {
+          handleSongFinish();
+        }
+      });
+      setIsPlaying(true);
+    } else {
       const { sound } = await Audio.Sound.createAsync(
         { uri: playableUri },
-        { shouldPlay: true, volume }
+        { shouldPlay: true, volume: volumeRef.current }
       );
-      sound.setOnPlaybackStatusUpdate(onPlaybackStatus);
-      soundRef.current = sound;
+      sound.setOnPlaybackStatusUpdate((status: AVPlaybackStatus) => {
+        if (!status.isLoaded) return;
+        setPosition(status.positionMillis ?? 0);
+        if (status.durationMillis) setDuration(status.durationMillis);
+        setIsPlaying(status.isPlaying);
+        if (status.didJustFinish) {
+          handleSongFinish();
+        }
+      });
+      nativeSoundRef.current = sound;
       setIsPlaying(true);
-    },
-    [unloadSound, volume, onPlaybackStatus]
-  );
+    }
+  }, [unloadAudio, handleSongFinish]);
 
-  const playSong = useCallback(
-    async (song: Song, q?: Song[]) => {
-      const newQueue = q ?? [song];
-      const idx = newQueue.findIndex((s) => s.id === song.id);
-      setQueue(newQueue);
-      setQueueIndex(idx >= 0 ? idx : 0);
-      setCurrentSong(song);
-      await loadAndPlay(song);
-    },
-    [loadAndPlay]
-  );
+  // Keep ref in sync
+  useEffect(() => {
+    loadAndPlayRef.current = loadAndPlay;
+  }, [loadAndPlay]);
+
+  const playSong = useCallback(async (song: Song, q?: Song[]) => {
+    const newQueue = q ?? [song];
+    const idx = newQueue.findIndex((s) => s.id === song.id);
+    setQueue(newQueue);
+    setQueueIndex(idx >= 0 ? idx : 0);
+    setCurrentSong(song);
+    await loadAndPlay(song);
+  }, [loadAndPlay]);
 
   const pauseResume = useCallback(async () => {
-    if (!soundRef.current) return;
-    try {
+    if (Platform.OS === "web") {
+      const player = webPlayerRef.current;
+      if (!player) return;
       if (isPlaying) {
-        await soundRef.current.pauseAsync();
+        await player.pause();
+        setIsPlaying(false);
       } else {
-        await soundRef.current.playAsync();
+        await player.play();
+        setIsPlaying(true);
       }
-    } catch {}
+    } else {
+      if (!nativeSoundRef.current) return;
+      try {
+        if (isPlaying) {
+          await nativeSoundRef.current.pauseAsync();
+        } else {
+          await nativeSoundRef.current.playAsync();
+        }
+      } catch {}
+    }
   }, [isPlaying]);
 
   const playNext = useCallback(async () => {
@@ -251,48 +288,54 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
     const idx = queueIndexRef.current;
     const nextIdx = shuffleRef.current
       ? Math.floor(Math.random() * q.length)
-      : idx + 1;
-    if (nextIdx < q.length) {
-      setQueueIndex(nextIdx);
-      const next = q[nextIdx];
-      setCurrentSong(next);
-      await loadAndPlay(next);
-    }
+      : Math.min(idx + 1, q.length - 1);
+    if (nextIdx >= q.length) return;
+    const next = q[nextIdx];
+    setQueueIndex(nextIdx);
+    setCurrentSong(next);
+    await loadAndPlay(next);
   }, [loadAndPlay]);
 
   const playPrev = useCallback(async () => {
     const q = queueRef.current;
     const idx = queueIndexRef.current;
     if (position > 3000) {
-      await soundRef.current?.setPositionAsync(0);
+      if (Platform.OS === "web") {
+        await webPlayerRef.current?.seek(0);
+      } else {
+        await nativeSoundRef.current?.setPositionAsync(0);
+      }
       return;
     }
     const prevIdx = Math.max(0, idx - 1);
-    setQueueIndex(prevIdx);
     const prev = q[prevIdx];
+    setQueueIndex(prevIdx);
     setCurrentSong(prev);
     await loadAndPlay(prev);
   }, [loadAndPlay, position]);
 
   const seekTo = useCallback(async (millis: number) => {
-    try {
-      await soundRef.current?.setPositionAsync(millis);
-    } catch {}
+    if (Platform.OS === "web") {
+      await webPlayerRef.current?.seek(millis);
+      setPosition(millis);
+    } else {
+      try { await nativeSoundRef.current?.setPositionAsync(millis); } catch {}
+    }
   }, []);
 
   const setVolumeLevel = useCallback(async (v: number) => {
     setVolume(v);
-    try {
-      await soundRef.current?.setVolumeAsync(v);
-    } catch {}
+    volumeRef.current = v;
+    if (Platform.OS === "web") {
+      await webPlayerRef.current?.setVolume(v);
+    } else {
+      try { await nativeSoundRef.current?.setVolumeAsync(v); } catch {}
+    }
   }, []);
 
   const toggleShuffle = useCallback(() => setShuffle((s) => !s), []);
   const toggleRepeat = useCallback(
-    () =>
-      setRepeat((r) =>
-        r === "none" ? "one" : r === "one" ? "all" : "none"
-      ),
+    () => setRepeat((r) => r === "none" ? "one" : r === "one" ? "all" : "none"),
     []
   );
 
@@ -304,64 +347,65 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
 
       const newSongs: Song[] = [];
       for (const file of picked) {
-        const storedUri = await storeAudioFile(file.id, file.uri);
-        const { title, artist } = parseFilename(file.name);
-        newSongs.push({
-          id: file.id,
-          title,
-          artist,
-          uri: storedUri,
-          duration: 0,
-          favorite: false,
-          addedAt: Date.now(),
-          mood: null,
-          gradientColors: getGradientColors(file.id),
-        });
+        try {
+          const storedUri = await storeAudioFile(file.id, file.uri);
+          const { title, artist } = parseFilename(file.name);
+          newSongs.push({
+            id: file.id,
+            title,
+            artist,
+            uri: storedUri,
+            duration: 0,
+            favorite: false,
+            addedAt: Date.now(),
+            mood: null,
+            gradientColors: getGradientColors(file.id),
+          });
+        } catch (err) {
+          console.warn("[MusicVault] Failed to store file:", file.name, err);
+        }
       }
 
-      setSongs((prev) => {
-        const updated = [...newSongs, ...prev];
-        saveToStorage(SONGS_KEY, updated);
-        return updated;
-      });
+      if (newSongs.length > 0) {
+        setSongs((prev) => {
+          const updated = [...newSongs, ...prev];
+          saveToStorage(SONGS_KEY, updated);
+          return updated;
+        });
+      }
     } finally {
       setIsLoading(false);
     }
   }, []);
 
-  const deleteSong = useCallback(
-    async (id: string) => {
-      const song = songs.find((s) => s.id === id);
-      if (song) {
-        await deleteAudioFile(id, song.uri);
-        if (currentSong?.id === id) {
-          await unloadSound();
-          setCurrentSong(null);
-          setIsPlaying(false);
-        }
+  const deleteSong = useCallback(async (id: string) => {
+    const song = songs.find((s) => s.id === id);
+    if (song) {
+      await deleteAudioFile(id, song.uri);
+      if (currentSong?.id === id) {
+        await unloadAudio();
+        setCurrentSong(null);
+        setIsPlaying(false);
       }
-      setSongs((prev) => {
-        const updated = prev.filter((s) => s.id !== id);
-        saveToStorage(SONGS_KEY, updated);
-        return updated;
-      });
-      setPlaylists((prev) => {
-        const updated = prev.map((p) => ({
-          ...p,
-          songIds: p.songIds.filter((sid) => sid !== id),
-        }));
-        saveToStorage(PLAYLISTS_KEY, updated);
-        return updated;
-      });
-    },
-    [songs, currentSong, unloadSound]
-  );
+    }
+    setSongs((prev) => {
+      const updated = prev.filter((s) => s.id !== id);
+      saveToStorage(SONGS_KEY, updated);
+      return updated;
+    });
+    setPlaylists((prev) => {
+      const updated = prev.map((p) => ({
+        ...p,
+        songIds: p.songIds.filter((sid) => sid !== id),
+      }));
+      saveToStorage(PLAYLISTS_KEY, updated);
+      return updated;
+    });
+  }, [songs, currentSong, unloadAudio]);
 
   const toggleFavorite = useCallback((id: string) => {
     setSongs((prev) => {
-      const updated = prev.map((s) =>
-        s.id === id ? { ...s, favorite: !s.favorite } : s
-      );
+      const updated = prev.map((s) => s.id === id ? { ...s, favorite: !s.favorite } : s);
       saveToStorage(SONGS_KEY, updated);
       return updated;
     });
@@ -369,7 +413,7 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
 
   const setSongMood = useCallback((id: string, mood: Mood | null) => {
     setSongs((prev) => {
-      const updated = prev.map((s) => (s.id === id ? { ...s, mood } : s));
+      const updated = prev.map((s) => s.id === id ? { ...s, mood } : s);
       saveToStorage(SONGS_KEY, updated);
       return updated;
     });
@@ -399,7 +443,7 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
 
   const renamePlaylist = useCallback((id: string, name: string) => {
     setPlaylists((prev) => {
-      const updated = prev.map((p) => (p.id === id ? { ...p, name } : p));
+      const updated = prev.map((p) => p.id === id ? { ...p, name } : p);
       saveToStorage(PLAYLISTS_KEY, updated);
       return updated;
     });
@@ -417,59 +461,33 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
     });
   }, []);
 
-  const removeFromPlaylist = useCallback(
-    (playlistId: string, songId: string) => {
-      setPlaylists((prev) => {
-        const updated = prev.map((p) =>
-          p.id === playlistId
-            ? { ...p, songIds: p.songIds.filter((id) => id !== songId) }
-            : p
-        );
-        saveToStorage(PLAYLISTS_KEY, updated);
-        return updated;
-      });
-    },
-    []
-  );
+  const removeFromPlaylist = useCallback((playlistId: string, songId: string) => {
+    setPlaylists((prev) => {
+      const updated = prev.map((p) =>
+        p.id === playlistId
+          ? { ...p, songIds: p.songIds.filter((id) => id !== songId) }
+          : p
+      );
+      saveToStorage(PLAYLISTS_KEY, updated);
+      return updated;
+    });
+  }, []);
 
   useEffect(() => {
-    return () => {
-      unloadSound();
-    };
-  }, [unloadSound]);
+    return () => { unloadAudio(); };
+  }, [unloadAudio]);
 
   return (
     <MusicContext.Provider
       value={{
-        songs,
-        playlists,
-        currentSong,
-        isPlaying,
-        position,
-        duration,
-        shuffle,
-        repeat,
-        volume,
-        queue,
-        currentMood,
-        isLoading,
-        addSongs,
-        deleteSong,
-        toggleFavorite,
-        setSongMood,
-        createPlaylist,
-        deletePlaylist,
-        renamePlaylist,
-        addToPlaylist,
-        removeFromPlaylist,
-        playSong,
-        pauseResume,
-        playNext,
-        playPrev,
-        toggleShuffle,
-        toggleRepeat,
-        seekTo,
-        setVolumeLevel,
+        songs, playlists, currentSong, isPlaying,
+        position, duration, shuffle, repeat, volume, queue,
+        currentMood, isLoading,
+        addSongs, deleteSong, toggleFavorite, setSongMood,
+        createPlaylist, deletePlaylist, renamePlaylist,
+        addToPlaylist, removeFromPlaylist,
+        playSong, pauseResume, playNext, playPrev,
+        toggleShuffle, toggleRepeat, seekTo, setVolumeLevel,
         setCurrentMood,
       }}
     >
