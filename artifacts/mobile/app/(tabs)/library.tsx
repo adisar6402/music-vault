@@ -3,7 +3,6 @@ import { Feather } from "@expo/vector-icons";
 import React, { useMemo, useState } from "react";
 import {
   ActivityIndicator,
-  Alert,
   FlatList,
   Platform,
   StyleSheet,
@@ -15,6 +14,8 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { MiniPlayer } from "@/components/MiniPlayer";
+import { MoodTagSheet } from "@/components/MoodTagSheet";
+import { SongContextMenu } from "@/components/SongContextMenu";
 import { SongItem } from "@/components/SongItem";
 import { Song, useMusic } from "@/context/MusicContext";
 import { useColors } from "@/hooks/useColors";
@@ -24,9 +25,12 @@ export default function LibraryScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
   const layout = useLayout();
-  const { songs, addSongs, deleteSong, currentSong, isLoading } = useMusic();
+  const { songs, addSongs, deleteSong, currentSong, isLoading, addToPlaylist, playlists } = useMusic();
+
   const [search, setSearch] = useState("");
   const [favOnly, setFavOnly] = useState(false);
+  const [contextSong, setContextSong] = useState<Song | null>(null);
+  const [moodSong, setMoodSong] = useState<Song | null>(null);
 
   const filtered = useMemo(() => {
     let list = songs;
@@ -43,11 +47,9 @@ export default function LibraryScreen() {
   const topPadding = Platform.OS === "web" ? 24 : insets.top;
   const contentPadding = layout.isDesktop ? 40 : 20;
 
-  const handleDelete = (song: Song) => {
-    Alert.alert("Delete Song", `Remove "${song.title}" from your vault?`, [
-      { text: "Cancel", style: "cancel" },
-      { text: "Delete", style: "destructive", onPress: () => deleteSong(song.id) },
-    ]);
+  const handleLongPress = (song: Song) => {
+    if (Platform.OS !== "web") Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    setContextSong(song);
   };
 
   const handleAdd = async () => {
@@ -55,20 +57,13 @@ export default function LibraryScreen() {
     await addSongs();
   };
 
-  // Desktop: 2-column grid
-  const numColumns = layout.isDesktop ? 1 : 1;
-
   return (
     <View style={[styles.container, { backgroundColor: colors.background }]}>
-      {/* Fixed header */}
+      {/* Header */}
       <View
         style={[
           styles.header,
-          {
-            paddingTop: topPadding + 20,
-            paddingHorizontal: contentPadding,
-            backgroundColor: colors.background,
-          },
+          { paddingTop: topPadding + 20, paddingHorizontal: contentPadding, backgroundColor: colors.background },
         ]}
       >
         <View style={styles.headerRow}>
@@ -117,7 +112,7 @@ export default function LibraryScreen() {
           )}
         </View>
 
-        {/* Filters row */}
+        {/* Filters */}
         <View style={styles.filtersRow}>
           <TouchableOpacity
             onPress={() => setFavOnly((v) => !v)}
@@ -130,38 +125,39 @@ export default function LibraryScreen() {
             ]}
           >
             <Feather name="heart" size={13} color={favOnly ? "#fff" : colors.mutedForeground} />
-            <Text
-              style={[
-                styles.filterText,
-                {
-                  color: favOnly ? "#fff" : colors.mutedForeground,
-                  fontFamily: favOnly ? "Inter_600SemiBold" : "Inter_400Regular",
-                },
-              ]}
-            >
+            <Text style={[styles.filterText, {
+              color: favOnly ? "#fff" : colors.mutedForeground,
+              fontFamily: favOnly ? "Inter_600SemiBold" : "Inter_400Regular",
+            }]}>
               Favorites
             </Text>
           </TouchableOpacity>
-          {filtered.length !== songs.length && (
+          {filtered.length !== songs.length && !favOnly && (
             <Text style={[styles.filterCount, { color: colors.mutedForeground, fontFamily: "Inter_400Regular" }]}>
               {filtered.length} result{filtered.length !== 1 ? "s" : ""}
             </Text>
           )}
+          <Text style={[styles.hint, { color: colors.mutedForeground, fontFamily: "Inter_400Regular" }]}>
+            Hold a song to tag mood
+          </Text>
         </View>
       </View>
 
       <FlatList
         data={filtered}
         keyExtractor={(s) => s.id}
-        numColumns={numColumns}
         renderItem={({ item }) => (
-          <SongItem song={item} queue={filtered} onLongPress={handleDelete} />
+          <SongItem
+            song={item}
+            queue={filtered}
+            onLongPress={handleLongPress}
+          />
         )}
         showsVerticalScrollIndicator={false}
         contentContainerStyle={[
           styles.list,
           {
-            paddingHorizontal: contentPadding - 16,
+            paddingHorizontal: contentPadding - 14,
             paddingBottom: layout.isDesktop ? 40 : currentSong ? 160 : 100,
           },
         ]}
@@ -169,17 +165,21 @@ export default function LibraryScreen() {
           <View style={styles.empty}>
             <Feather
               name={favOnly ? "heart" : search ? "search" : "music"}
-              size={48}
+              size={44}
               color={colors.mutedForeground}
             />
+            <Text style={[styles.emptyTitle, { color: colors.foreground, fontFamily: "Inter_600SemiBold" }]}>
+              {favOnly ? "No favorites yet" : search ? "No results" : "Library is empty"}
+            </Text>
             <Text style={[styles.emptyText, { color: colors.mutedForeground, fontFamily: "Inter_400Regular" }]}>
-              {favOnly ? "No favorites yet" : search ? "No songs found" : "Your library is empty"}
+              {favOnly
+                ? "Tap the ♥ on any song to save it here"
+                : search
+                ? "Try a different search term"
+                : "Upload MP3 files to start listening"}
             </Text>
             {!favOnly && !search && (
-              <TouchableOpacity
-                onPress={handleAdd}
-                style={[styles.emptyBtn, { backgroundColor: colors.primary }]}
-              >
+              <TouchableOpacity onPress={handleAdd} style={[styles.emptyBtn, { backgroundColor: colors.primary }]}>
                 <Text style={[styles.emptyBtnText, { color: "#fff", fontFamily: "Inter_600SemiBold" }]}>
                   Add Songs
                 </Text>
@@ -194,6 +194,32 @@ export default function LibraryScreen() {
           <MiniPlayer />
         </View>
       )}
+
+      {/* Context menu (long press) */}
+      <SongContextMenu
+        song={contextSong}
+        onClose={() => setContextSong(null)}
+        onTagMood={() => {
+          setMoodSong(contextSong);
+          setContextSong(null);
+        }}
+        onDelete={contextSong ? () => deleteSong(contextSong.id) : undefined}
+        onAddToPlaylist={
+          playlists.length > 0 && contextSong
+            ? () => {
+                if (playlists.length === 1) {
+                  addToPlaylist(playlists[0].id, contextSong!.id);
+                }
+              }
+            : undefined
+        }
+      />
+
+      {/* Mood tag sheet */}
+      <MoodTagSheet
+        song={moodSong}
+        onClose={() => setMoodSong(null)}
+      />
     </View>
   );
 }
@@ -235,6 +261,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 10,
     marginBottom: 4,
+    flexWrap: "wrap",
   },
   filterPill: {
     flexDirection: "row",
@@ -246,11 +273,13 @@ const styles = StyleSheet.create({
     gap: 6,
   },
   filterText: { fontSize: 13 },
-  filterCount: { fontSize: 13, marginLeft: "auto" },
+  filterCount: { fontSize: 13 },
+  hint: { fontSize: 12, marginLeft: "auto" },
   list: { paddingTop: 8 },
-  empty: { alignItems: "center", paddingTop: 80, gap: 16 },
-  emptyText: { fontSize: 16 },
-  emptyBtn: { marginTop: 4, paddingHorizontal: 24, paddingVertical: 12, borderRadius: 24 },
+  empty: { alignItems: "center", paddingTop: 80, paddingHorizontal: 40, gap: 12 },
+  emptyTitle: { fontSize: 18 },
+  emptyText: { fontSize: 14, textAlign: "center", lineHeight: 20 },
+  emptyBtn: { marginTop: 8, paddingHorizontal: 24, paddingVertical: 12, borderRadius: 24 },
   emptyBtnText: { fontSize: 15 },
   miniPlayerWrapper: { position: "absolute", left: 8, right: 8 },
 });
