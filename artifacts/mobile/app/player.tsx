@@ -2,11 +2,14 @@ import * as Haptics from "expo-haptics";
 import { LinearGradient } from "expo-linear-gradient";
 import { Feather } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   Animated,
+  FlatList,
+  Modal,
   PanResponder,
   Platform,
+  ScrollView,
   StyleSheet,
   Text,
   TouchableOpacity,
@@ -15,7 +18,13 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { AlbumArt } from "@/components/AlbumArt";
-import { useMusic } from "@/context/MusicContext";
+import { QueueSheet } from "@/components/QueueSheet";
+import { VolumeSlider } from "@/components/VolumeSlider";
+import {
+  SLEEP_OPTIONS,
+  SPEED_OPTIONS,
+  useMusic,
+} from "@/context/MusicContext";
 import { useColors } from "@/hooks/useColors";
 import { useLayout } from "@/hooks/useLayout";
 
@@ -28,26 +37,62 @@ function formatTime(ms: number): string {
 
 const SWIPE_THRESHOLD = 80;
 
+function haptic(style: "light" | "medium" = "light") {
+  if (Platform.OS !== "web") {
+    Haptics.impactAsync(
+      style === "medium"
+        ? Haptics.ImpactFeedbackStyle.Medium
+        : Haptics.ImpactFeedbackStyle.Light
+    );
+  }
+}
+
+// Waveform bars derived deterministically from song id
+function useWaveform(songId: string | undefined, barCount = 60) {
+  return useMemo(() => {
+    if (!songId) return [];
+    const seed = songId.split("").reduce((a, c) => a + c.charCodeAt(0), 0);
+    return Array.from({ length: barCount }, (_, i) => {
+      const v =
+        Math.abs(Math.sin(seed * 0.013 + i * 0.37) * 0.6 +
+          Math.sin(seed * 0.007 + i * 0.91) * 0.4);
+      return 4 + v * 26;
+    });
+  }, [songId, barCount]);
+}
+
 export default function PlayerScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
   const router = useRouter();
   const layout = useLayout();
+
   const {
     currentSong, isPlaying, position, duration,
-    shuffle, repeat, volume,
-    pauseResume, playNext, playPrev,
-    toggleShuffle, toggleRepeat, seekTo, setVolumeLevel,
+    shuffle, repeat, volume, playlists, playbackSpeed, sleepTimerEnd,
+    pauseResume, playNext, playPrev, toggleShuffle, toggleRepeat,
+    seekTo, setVolumeLevel, toggleFavorite, addToPlaylist,
+    setPlaybackSpeed, setSleepTimer,
   } = useMusic();
 
-  const artScale = useRef(new Animated.Value(isPlaying ? 1 : 0.9)).current;
+  const artScale = useRef(new Animated.Value(1)).current;
   const swipeX = useRef(new Animated.Value(0)).current;
   const isSwiping = useRef(false);
-  const [isSeeking, setIsSeeking] = useState(false);
-  const [seekPosition, setSeekPosition] = useState(0);
-  const progressBarRef = useRef<View>(null);
-  const progressBarWidth = useRef(0);
+  const progressWidth = useRef(0);
 
+  const [showQueue, setShowQueue] = useState(false);
+  const [showMoreMenu, setShowMoreMenu] = useState(false);
+  const [showSpeedPicker, setShowSpeedPicker] = useState(false);
+  const [showSleepTimer, setShowSleepTimer] = useState(false);
+  const [showAddToPlaylist, setShowAddToPlaylist] = useState(false);
+
+  const waveformBars = useWaveform(currentSong?.id);
+  const progress = duration > 0 ? position / duration : 0;
+  const topPad = Platform.OS === "web" ? 24 : insets.top;
+  const botPad = Platform.OS === "web" ? 32 : insets.bottom;
+  const artSize = layout.isDesktop ? 260 : layout.isTablet ? 300 : 260;
+
+  // Album art pulse on play/pause
   useEffect(() => {
     Animated.spring(artScale, {
       toValue: isPlaying ? 1 : 0.88,
@@ -57,15 +102,12 @@ export default function PlayerScreen() {
     }).start();
   }, [isPlaying, artScale]);
 
-  const handlePlayPause = () => {
-    if (Platform.OS !== "web") Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    pauseResume();
-  };
-
+  // Swipe to change song
   const panResponder = useRef(
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
-      onMoveShouldSetPanResponder: (_, g) => Math.abs(g.dx) > Math.abs(g.dy) * 1.5,
+      onMoveShouldSetPanResponder: (_, g) =>
+        Math.abs(g.dx) > Math.abs(g.dy) * 1.5,
       onPanResponderGrant: () => { isSwiping.current = false; },
       onPanResponderMove: (_, g) => {
         if (Math.abs(g.dx) > 10) isSwiping.current = true;
@@ -73,41 +115,39 @@ export default function PlayerScreen() {
       },
       onPanResponderRelease: (_, g) => {
         if (g.dx < -SWIPE_THRESHOLD) {
-          Animated.timing(swipeX, { toValue: -400, duration: 150, useNativeDriver: true }).start(() => {
-            swipeX.setValue(0);
-            playNext();
+          Animated.timing(swipeX, { toValue: -500, duration: 140, useNativeDriver: true }).start(() => {
+            swipeX.setValue(0); playNext(); haptic();
           });
-          if (Platform.OS !== "web") Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
         } else if (g.dx > SWIPE_THRESHOLD) {
-          Animated.timing(swipeX, { toValue: 400, duration: 150, useNativeDriver: true }).start(() => {
-            swipeX.setValue(0);
-            playPrev();
+          Animated.timing(swipeX, { toValue: 500, duration: 140, useNativeDriver: true }).start(() => {
+            swipeX.setValue(0); playPrev(); haptic();
           });
-          if (Platform.OS !== "web") Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
         } else {
           Animated.spring(swipeX, { toValue: 0, useNativeDriver: true }).start();
-          if (!isSwiping.current) handlePlayPause();
+          if (!isSwiping.current) { pauseResume(); haptic("medium"); }
         }
       },
     })
   ).current;
 
-  const progress = duration > 0 ? (isSeeking ? seekPosition : position) / duration : 0;
-  const artSize = layout.isDesktop ? 260 : layout.isTablet ? 300 : 280;
-
-  const topPad = Platform.OS === "web" ? 24 : insets.top;
-  const botPad = Platform.OS === "web" ? 32 : insets.bottom;
+  // Sleep timer remaining
+  const sleepRemaining = sleepTimerEnd
+    ? Math.max(0, Math.ceil((sleepTimerEnd - Date.now()) / 60000))
+    : null;
 
   if (!currentSong) {
     return (
       <View style={[styles.container, { backgroundColor: colors.background }]}>
-        <TouchableOpacity onPress={() => router.back()} style={[styles.topBtn, { marginTop: topPad + 16, marginLeft: 20 }]}>
+        <TouchableOpacity
+          onPress={() => router.back()}
+          style={[styles.closeBtn, { marginTop: topPad + 8, marginLeft: 20 }]}
+        >
           <Feather name="chevron-down" size={24} color={colors.foreground} />
         </TouchableOpacity>
-        <View style={styles.noSongCenter}>
+        <View style={styles.emptyCenter}>
           <Feather name="music" size={64} color={colors.mutedForeground} />
-          <Text style={[styles.noSong, { color: colors.mutedForeground, fontFamily: "Inter_400Regular" }]}>
-            No song playing
+          <Text style={[styles.emptyText, { color: colors.mutedForeground, fontFamily: "Inter_400Regular" }]}>
+            Nothing playing
           </Text>
         </View>
       </View>
@@ -116,294 +156,528 @@ export default function PlayerScreen() {
 
   return (
     <View style={[styles.container, { backgroundColor: "#000" }]}>
-      {/* Blurred gradient background */}
+      {/* Blurred gradient BG */}
       <LinearGradient
-        colors={[...currentSong.gradientColors, "#000000"]}
-        start={{ x: 0.2, y: 0 }}
-        end={{ x: 0.8, y: 1 }}
+        colors={[currentSong.gradientColors[0], "#050505"]}
+        start={{ x: 0.3, y: 0 }}
+        end={{ x: 0.7, y: 0.9 }}
         style={StyleSheet.absoluteFill}
       />
-      <View style={[StyleSheet.absoluteFill, { backgroundColor: "rgba(0,0,0,0.6)" }]} />
+      <View style={[StyleSheet.absoluteFill, { backgroundColor: "rgba(0,0,0,0.62)" }]} />
 
-      <View style={[styles.inner, layout.isDesktop && styles.innerDesktop]}>
-        {/* Top bar */}
-        <View style={[styles.topBar, { paddingTop: topPad + 8 }]}>
+      <ScrollView
+        style={{ flex: 1 }}
+        contentContainerStyle={[
+          styles.inner,
+          { paddingTop: topPad + 8, paddingBottom: botPad + 20 },
+          layout.isDesktop && styles.innerDesktop,
+        ]}
+        scrollEnabled={false}
+        showsVerticalScrollIndicator={false}
+      >
+        {/* ── Top bar ── */}
+        <View style={styles.topBar}>
           <TouchableOpacity
             onPress={() => router.back()}
             hitSlop={12}
-            style={[styles.topBtn, { backgroundColor: "rgba(255,255,255,0.1)" }]}
+            style={styles.closeBtn}
           >
-            <Feather name="chevron-down" size={24} color="#fff" />
+            <Feather name="chevron-down" size={26} color="#fff" />
           </TouchableOpacity>
+
           <View style={styles.topCenter}>
-            <Text style={[styles.nowPlayingLabel, { color: "rgba(255,255,255,0.55)", fontFamily: "Inter_400Regular" }]}>
+            <Text style={[styles.topLabel, { color: "rgba(255,255,255,0.5)", fontFamily: "Inter_400Regular" }]}>
               Now Playing
             </Text>
-            <Text style={[styles.nowPlayingTitle, { color: "#fff", fontFamily: "Inter_600SemiBold" }]} numberOfLines={1}>
-              {currentSong.title}
-            </Text>
           </View>
-          <View style={{ width: 40 }} />
+
+          <TouchableOpacity
+            onPress={() => setShowMoreMenu(true)}
+            hitSlop={12}
+            style={styles.moreBtn}
+          >
+            <Feather name="more-horizontal" size={22} color="rgba(255,255,255,0.7)" />
+          </TouchableOpacity>
         </View>
 
-        {/* Main content */}
-        <View style={[styles.mainContent, layout.isDesktop && styles.mainContentDesktop]}>
+        {/* ── Main layout ── */}
+        <View style={[styles.mainLayout, layout.isDesktop && styles.mainLayoutDesktop]}>
+
           {/* Album art */}
           <Animated.View
             style={[
               styles.artWrapper,
               { transform: [{ scale: artScale }, { translateX: swipeX }] },
-              layout.isDesktop && styles.artWrapperDesktop,
+              layout.isDesktop && { marginBottom: 0, marginRight: 0 },
             ]}
             {...panResponder.panHandlers}
           >
-            <AlbumArt colors={currentSong.gradientColors} size={artSize} borderRadius={24} />
+            <AlbumArt
+              colors={currentSong.gradientColors}
+              size={artSize}
+              borderRadius={28}
+            />
+            {/* Swipe hint text */}
+            <Text style={[styles.swipeHint, { color: "rgba(255,255,255,0.3)", fontFamily: "Inter_400Regular" }]}>
+              swipe or tap
+            </Text>
           </Animated.View>
 
-          {/* Right side (desktop) or below art (mobile) */}
-          <View style={[styles.controlsSection, layout.isDesktop && styles.controlsSectionDesktop]}>
-            {/* Song info */}
-            <View style={styles.songInfo}>
-              <Text
-                style={[styles.songTitle, { color: "#fff", fontFamily: "Inter_700Bold" }]}
-                numberOfLines={1}
-              >
-                {currentSong.title}
-              </Text>
-              <Text
-                style={[styles.songArtist, { color: "rgba(255,255,255,0.6)", fontFamily: "Inter_400Regular" }]}
-                numberOfLines={1}
-              >
-                {currentSong.artist}
-              </Text>
-            </View>
+          {/* Controls column */}
+          <View style={[styles.controlsCol, layout.isDesktop && styles.controlsColDesktop]}>
 
-            {/* Progress bar */}
-            <View style={styles.progressSection}>
-              <TouchableOpacity
-                activeOpacity={1}
-                onLayout={(e) => { progressBarWidth.current = e.nativeEvent.layout.width; }}
-                onPress={(e) => {
-                  const x = e.nativeEvent.locationX;
-                  const ratio = Math.max(0, Math.min(1, x / progressBarWidth.current));
-                  const ms = ratio * duration;
-                  seekTo(ms);
-                }}
-                style={styles.progressBarTouchable}
-              >
-                <View style={[styles.progressTrack, { backgroundColor: "rgba(255,255,255,0.2)" }]}>
-                  <View
-                    style={[
-                      styles.progressFill,
-                      { width: `${progress * 100}%` as unknown as number },
-                    ]}
-                  />
-                  <View
-                    style={[
-                      styles.progressThumb,
-                      { left: `${Math.min(95, progress * 100)}%` as unknown as number },
-                    ]}
-                  />
-                </View>
-              </TouchableOpacity>
-              <View style={styles.timeRow}>
-                <Text style={[styles.timeText, { color: "rgba(255,255,255,0.5)", fontFamily: "Inter_400Regular" }]}>
-                  {formatTime(position)}
+            {/* Song info row */}
+            <View style={styles.songInfoRow}>
+              <View style={{ flex: 1 }}>
+                <Text
+                  style={[styles.songTitle, { color: "#fff", fontFamily: "Inter_700Bold" }]}
+                  numberOfLines={1}
+                >
+                  {currentSong.title}
                 </Text>
-                <Text style={[styles.timeText, { color: "rgba(255,255,255,0.5)", fontFamily: "Inter_400Regular" }]}>
-                  {formatTime(duration)}
+                <Text
+                  style={[styles.songArtist, { color: "rgba(255,255,255,0.55)", fontFamily: "Inter_400Regular" }]}
+                  numberOfLines={1}
+                >
+                  {currentSong.artist}
                 </Text>
               </View>
-            </View>
-
-            {/* Main controls */}
-            <View style={styles.controls}>
-              <TouchableOpacity onPress={toggleShuffle} hitSlop={12}>
+              <TouchableOpacity
+                onPress={() => { haptic(); toggleFavorite(currentSong.id); }}
+                hitSlop={10}
+                style={styles.heartBtn}
+              >
                 <Feather
-                  name="shuffle"
-                  size={22}
-                  color={shuffle ? "#a855f7" : "rgba(255,255,255,0.45)"}
+                  name="heart"
+                  size={24}
+                  color={currentSong.favorite ? "#ef4444" : "rgba(255,255,255,0.4)"}
                 />
               </TouchableOpacity>
+            </View>
 
-              <TouchableOpacity onPress={playPrev} hitSlop={8}>
-                <Feather name="skip-back" size={34} color="#fff" />
+            {/* ── Waveform progress ── */}
+            <TouchableOpacity
+              activeOpacity={1}
+              onLayout={(e) => { progressWidth.current = e.nativeEvent.layout.width; }}
+              onPress={(e) => {
+                const ratio = Math.max(0, Math.min(1, e.nativeEvent.locationX / progressWidth.current));
+                seekTo(ratio * duration);
+              }}
+              style={styles.waveformTouchable}
+            >
+              <View style={styles.waveform}>
+                {waveformBars.map((h, i) => {
+                  const barRatio = i / waveformBars.length;
+                  const isActive = barRatio <= progress;
+                  return (
+                    <View
+                      key={i}
+                      style={[
+                        styles.waveBar,
+                        {
+                          height: h,
+                          backgroundColor: isActive
+                            ? currentSong.gradientColors[0]
+                            : "rgba(255,255,255,0.12)",
+                          borderRadius: 2,
+                        },
+                      ]}
+                    />
+                  );
+                })}
+              </View>
+            </TouchableOpacity>
+
+            {/* Time row */}
+            <View style={styles.timeRow}>
+              <Text style={[styles.timeText, { color: "rgba(255,255,255,0.45)", fontFamily: "Inter_400Regular" }]}>
+                {formatTime(position)}
+              </Text>
+              <Text style={[styles.timeText, { color: "rgba(255,255,255,0.45)", fontFamily: "Inter_400Regular" }]}>
+                {formatTime(duration)}
+              </Text>
+            </View>
+
+            {/* ── Main controls ── */}
+            <View style={styles.controls}>
+              {/* Shuffle */}
+              <TouchableOpacity onPress={() => { haptic(); toggleShuffle(); }} hitSlop={12}>
+                <View>
+                  <Feather
+                    name="shuffle"
+                    size={22}
+                    color={shuffle ? "#a855f7" : "rgba(255,255,255,0.4)"}
+                  />
+                  {shuffle && <View style={[styles.activeDot, { backgroundColor: "#a855f7" }]} />}
+                </View>
               </TouchableOpacity>
 
-              <TouchableOpacity onPress={handlePlayPause} activeOpacity={0.85}>
+              <TouchableOpacity onPress={() => { haptic(); playPrev(); }} hitSlop={10}>
+                <Feather name="skip-back" size={32} color="#fff" />
+              </TouchableOpacity>
+
+              {/* Play/pause */}
+              <TouchableOpacity
+                onPress={() => { haptic("medium"); pauseResume(); }}
+                activeOpacity={0.85}
+              >
                 <LinearGradient
                   colors={["#a855f7", "#7c3aed"]}
-                  style={styles.playBtnGrad}
+                  style={styles.playBtn}
                 >
                   <Feather name={isPlaying ? "pause" : "play"} size={30} color="#fff" />
                 </LinearGradient>
               </TouchableOpacity>
 
-              <TouchableOpacity onPress={playNext} hitSlop={8}>
-                <Feather name="skip-forward" size={34} color="#fff" />
+              <TouchableOpacity onPress={() => { haptic(); playNext(); }} hitSlop={10}>
+                <Feather name="skip-forward" size={32} color="#fff" />
               </TouchableOpacity>
 
-              <TouchableOpacity onPress={toggleRepeat} hitSlop={12}>
+              {/* Repeat – 3 states with clear icons */}
+              <TouchableOpacity onPress={() => { haptic(); toggleRepeat(); }} hitSlop={12}>
                 <View>
-                  <Feather
-                    name="repeat"
-                    size={22}
-                    color={repeat !== "none" ? "#a855f7" : "rgba(255,255,255,0.45)"}
-                  />
+                  {repeat === "none" && (
+                    <Feather name="repeat" size={22} color="rgba(255,255,255,0.4)" />
+                  )}
+                  {repeat === "all" && (
+                    <Feather name="repeat" size={22} color="#a855f7" />
+                  )}
                   {repeat === "one" && (
-                    <View style={styles.repeatBadge}>
-                      <Text style={[styles.repeatBadgeText, { color: "#a855f7" }]}>1</Text>
+                    <View style={styles.repeatOneContainer}>
+                      <Feather name="repeat" size={22} color="#a855f7" />
+                      <View style={[styles.repeatOneBadge, { backgroundColor: "#a855f7" }]}>
+                        <Text style={[styles.repeatOneText, { color: "#fff" }]}>1</Text>
+                      </View>
                     </View>
+                  )}
+                  {repeat !== "none" && (
+                    <View style={[styles.activeDot, { backgroundColor: "#a855f7" }]} />
                   )}
                 </View>
               </TouchableOpacity>
             </View>
 
-            {/* Volume */}
-            <View style={[styles.volumeRow, { paddingBottom: botPad + 16 }]}>
-              <Feather name="volume" size={16} color="rgba(255,255,255,0.4)" />
+            {/* ── Volume slider ── */}
+            <VolumeSlider value={volume} onChange={setVolumeLevel} />
+
+            {/* ── Bottom action bar ── */}
+            <View style={styles.actionBar}>
+              {/* Queue */}
               <TouchableOpacity
-                style={styles.volumeTrackTouch}
-                onPress={(e) => {
-                  const x = e.nativeEvent.locationX;
-                  const tw = e.nativeEvent.target;
-                  // Simple toggle for volume control
-                  const newVol = volume > 0.66 ? 0.33 : volume > 0.33 ? 0.66 : 1;
-                  setVolumeLevel(newVol);
-                }}
-                activeOpacity={1}
+                onPress={() => setShowQueue(true)}
+                style={styles.actionBtn}
               >
-                <View style={[styles.volumeTrack, { backgroundColor: "rgba(255,255,255,0.15)" }]}>
-                  <LinearGradient
-                    colors={["#a855f7", "#7c3aed"]}
-                    start={{ x: 0, y: 0 }}
-                    end={{ x: 1, y: 0 }}
-                    style={[styles.volumeFill, { width: `${volume * 100}%` as unknown as number }]}
-                  />
-                </View>
+                <Feather name="list" size={18} color="rgba(255,255,255,0.55)" />
+                <Text style={[styles.actionLabel, { color: "rgba(255,255,255,0.55)", fontFamily: "Inter_400Regular" }]}>
+                  Queue
+                </Text>
               </TouchableOpacity>
-              <Feather name="volume-2" size={16} color="rgba(255,255,255,0.4)" />
+
+              {/* Speed */}
+              <TouchableOpacity
+                onPress={() => setShowSpeedPicker(true)}
+                style={styles.actionBtn}
+              >
+                <View style={[styles.speedBadge, { borderColor: playbackSpeed !== 1 ? "#a855f7" : "rgba(255,255,255,0.3)" }]}>
+                  <Text style={[
+                    styles.speedText,
+                    { color: playbackSpeed !== 1 ? "#a855f7" : "rgba(255,255,255,0.55)", fontFamily: "Inter_600SemiBold" }
+                  ]}>
+                    {playbackSpeed === 1 ? "1×" : `${playbackSpeed}×`}
+                  </Text>
+                </View>
+                <Text style={[styles.actionLabel, { color: "rgba(255,255,255,0.55)", fontFamily: "Inter_400Regular" }]}>
+                  Speed
+                </Text>
+              </TouchableOpacity>
+
+              {/* Sleep timer */}
+              <TouchableOpacity
+                onPress={() => setShowSleepTimer(true)}
+                style={styles.actionBtn}
+              >
+                <View style={{ position: "relative" }}>
+                  <Feather
+                    name="moon"
+                    size={18}
+                    color={sleepTimerEnd ? "#a855f7" : "rgba(255,255,255,0.55)"}
+                  />
+                  {sleepRemaining !== null && (
+                    <View style={[styles.timerBadge, { backgroundColor: "#a855f7" }]}>
+                      <Text style={[styles.timerBadgeText, { color: "#fff" }]}>{sleepRemaining}</Text>
+                    </View>
+                  )}
+                </View>
+                <Text style={[styles.actionLabel, { color: sleepTimerEnd ? "#a855f7" : "rgba(255,255,255,0.55)", fontFamily: "Inter_400Regular" }]}>
+                  {sleepRemaining !== null ? `${sleepRemaining}m` : "Sleep"}
+                </Text>
+              </TouchableOpacity>
+
+              {/* Add to playlist */}
+              <TouchableOpacity
+                onPress={() => setShowAddToPlaylist(true)}
+                style={styles.actionBtn}
+              >
+                <Feather name="plus-circle" size={18} color="rgba(255,255,255,0.55)" />
+                <Text style={[styles.actionLabel, { color: "rgba(255,255,255,0.55)", fontFamily: "Inter_400Regular" }]}>
+                  Playlist
+                </Text>
+              </TouchableOpacity>
             </View>
+
           </View>
         </View>
-      </View>
+      </ScrollView>
+
+      {/* ── Queue sheet ── */}
+      <QueueSheet visible={showQueue} onClose={() => setShowQueue(false)} />
+
+      {/* ── More options menu ── */}
+      <Modal visible={showMoreMenu} transparent animationType="fade" onRequestClose={() => setShowMoreMenu(false)}>
+        <TouchableOpacity style={styles.modalOverlay} activeOpacity={1} onPress={() => setShowMoreMenu(false)}>
+          <View style={[styles.menuCard, { backgroundColor: "#1c1c1c" }]}>
+            {[
+              { icon: "heart", label: currentSong.favorite ? "Remove from Favorites" : "Add to Favorites", action: () => { toggleFavorite(currentSong.id); setShowMoreMenu(false); } },
+              { icon: "plus-circle", label: "Add to Playlist", action: () => { setShowMoreMenu(false); setShowAddToPlaylist(true); } },
+              { icon: "list", label: "View Queue", action: () => { setShowMoreMenu(false); setShowQueue(true); } },
+              { icon: "zap", label: "Playback Speed", action: () => { setShowMoreMenu(false); setShowSpeedPicker(true); } },
+              { icon: "moon", label: "Sleep Timer", action: () => { setShowMoreMenu(false); setShowSleepTimer(true); } },
+            ].map((item, idx) => (
+              <TouchableOpacity key={idx} onPress={item.action} style={styles.menuItem}>
+                <Feather name={item.icon as "heart"} size={18} color={item.icon === "heart" && currentSong.favorite ? "#ef4444" : "#fff"} />
+                <Text style={[styles.menuItemText, { color: "#fff", fontFamily: "Inter_500Medium" }]}>{item.label}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        </TouchableOpacity>
+      </Modal>
+
+      {/* ── Speed picker ── */}
+      <Modal visible={showSpeedPicker} transparent animationType="fade" onRequestClose={() => setShowSpeedPicker(false)}>
+        <TouchableOpacity style={styles.modalOverlay} activeOpacity={1} onPress={() => setShowSpeedPicker(false)}>
+          <View style={[styles.pickerCard, { backgroundColor: "#1c1c1c" }]}>
+            <Text style={[styles.pickerTitle, { color: "#fff", fontFamily: "Inter_700Bold" }]}>Playback Speed</Text>
+            <View style={styles.speedGrid}>
+              {SPEED_OPTIONS.map((s) => (
+                <TouchableOpacity
+                  key={s}
+                  onPress={() => { setPlaybackSpeed(s); setShowSpeedPicker(false); haptic(); }}
+                  style={[
+                    styles.speedOption,
+                    {
+                      backgroundColor: playbackSpeed === s ? "#a855f7" : "rgba(255,255,255,0.08)",
+                      borderColor: playbackSpeed === s ? "#a855f7" : "transparent",
+                    },
+                  ]}
+                >
+                  <Text style={[styles.speedOptionText, { color: playbackSpeed === s ? "#fff" : "rgba(255,255,255,0.6)", fontFamily: playbackSpeed === s ? "Inter_700Bold" : "Inter_400Regular" }]}>
+                    {s === 1 ? "Normal" : `${s}×`}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          </View>
+        </TouchableOpacity>
+      </Modal>
+
+      {/* ── Sleep timer ── */}
+      <Modal visible={showSleepTimer} transparent animationType="fade" onRequestClose={() => setShowSleepTimer(false)}>
+        <TouchableOpacity style={styles.modalOverlay} activeOpacity={1} onPress={() => setShowSleepTimer(false)}>
+          <View style={[styles.pickerCard, { backgroundColor: "#1c1c1c" }]}>
+            <Text style={[styles.pickerTitle, { color: "#fff", fontFamily: "Inter_700Bold" }]}>Sleep Timer</Text>
+            <Text style={[styles.pickerSub, { color: "rgba(255,255,255,0.45)", fontFamily: "Inter_400Regular" }]}>
+              Music will pause after the selected time
+            </Text>
+            {SLEEP_OPTIONS.map((mins) => (
+              <TouchableOpacity
+                key={mins}
+                onPress={() => { setSleepTimer(mins); setShowSleepTimer(false); haptic(); }}
+                style={[
+                  styles.sleepOption,
+                  {
+                    backgroundColor: sleepRemaining !== null && Math.abs(sleepRemaining - mins) <= 1
+                      ? "rgba(168,85,247,0.15)"
+                      : "transparent",
+                    borderColor: sleepRemaining !== null && Math.abs(sleepRemaining - mins) <= 1
+                      ? "#a855f7"
+                      : "rgba(255,255,255,0.1)",
+                  },
+                ]}
+              >
+                <Feather name="moon" size={16} color={sleepRemaining !== null ? "#a855f7" : "rgba(255,255,255,0.5)"} />
+                <Text style={[styles.sleepOptionText, { color: "#fff", fontFamily: "Inter_500Medium" }]}>
+                  {mins} minutes
+                </Text>
+              </TouchableOpacity>
+            ))}
+            {sleepTimerEnd && (
+              <TouchableOpacity
+                onPress={() => { setSleepTimer(null); setShowSleepTimer(false); }}
+                style={[styles.sleepOption, { borderColor: "#ef4444" }]}
+              >
+                <Feather name="x-circle" size={16} color="#ef4444" />
+                <Text style={[styles.sleepOptionText, { color: "#ef4444", fontFamily: "Inter_500Medium" }]}>
+                  Cancel Timer ({sleepRemaining}m left)
+                </Text>
+              </TouchableOpacity>
+            )}
+          </View>
+        </TouchableOpacity>
+      </Modal>
+
+      {/* ── Add to playlist ── */}
+      <Modal visible={showAddToPlaylist} transparent animationType="slide" onRequestClose={() => setShowAddToPlaylist(false)}>
+        <TouchableOpacity style={styles.modalOverlay} activeOpacity={1} onPress={() => setShowAddToPlaylist(false)}>
+          <View style={[styles.sheetCard, { backgroundColor: "#1c1c1c" }]}>
+            <View style={styles.sheetHandle}>
+              <View style={[styles.handle, { backgroundColor: "rgba(255,255,255,0.2)" }]} />
+            </View>
+            <Text style={[styles.pickerTitle, { color: "#fff", fontFamily: "Inter_700Bold", marginBottom: 8 }]}>
+              Add to Playlist
+            </Text>
+            {playlists.length === 0 ? (
+              <Text style={[styles.pickerSub, { color: "rgba(255,255,255,0.4)", textAlign: "center", padding: 20, fontFamily: "Inter_400Regular" }]}>
+                No playlists yet. Create one in the Playlists tab.
+              </Text>
+            ) : (
+              <FlatList
+                data={playlists}
+                keyExtractor={(p) => p.id}
+                style={{ maxHeight: 300 }}
+                renderItem={({ item }) => {
+                  const inPlaylist = item.songIds.includes(currentSong.id);
+                  return (
+                    <TouchableOpacity
+                      onPress={() => {
+                        if (!inPlaylist) {
+                          addToPlaylist(item.id, currentSong.id);
+                          haptic();
+                        }
+                        setShowAddToPlaylist(false);
+                      }}
+                      style={[styles.playlistOption, { borderBottomColor: "rgba(255,255,255,0.06)" }]}
+                    >
+                      <Feather name="music" size={16} color={inPlaylist ? "#a855f7" : "rgba(255,255,255,0.4)"} />
+                      <Text style={[styles.playlistOptionText, { color: inPlaylist ? "#a855f7" : "#fff", fontFamily: inPlaylist ? "Inter_600SemiBold" : "Inter_400Regular" }]}>
+                        {item.name}
+                      </Text>
+                      {inPlaylist && (
+                        <Feather name="check" size={14} color="#a855f7" />
+                      )}
+                    </TouchableOpacity>
+                  );
+                }}
+              />
+            )}
+          </View>
+        </TouchableOpacity>
+      </Modal>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1 },
-  inner: { flex: 1 },
-  innerDesktop: {},
-  noSongCenter: { flex: 1, alignItems: "center", justifyContent: "center", gap: 16 },
-  noSong: { fontSize: 18 },
-  topBar: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    paddingHorizontal: 24,
-    paddingBottom: 12,
-  },
-  topBtn: {
+  inner: { paddingHorizontal: 28 },
+  innerDesktop: { paddingHorizontal: 60 },
+  emptyCenter: { flex: 1, alignItems: "center", justifyContent: "center", gap: 16 },
+  emptyText: { fontSize: 18 },
+  closeBtn: {
     width: 40,
     height: 40,
     borderRadius: 20,
     alignItems: "center",
     justifyContent: "center",
+    backgroundColor: "rgba(255,255,255,0.08)",
   },
-  topCenter: { flex: 1, alignItems: "center", paddingHorizontal: 12 },
-  nowPlayingLabel: { fontSize: 11, letterSpacing: 1, textTransform: "uppercase" },
-  nowPlayingTitle: { fontSize: 14, marginTop: 2 },
-
-  mainContent: {
-    flex: 1,
-    alignItems: "center",
-    paddingHorizontal: 28,
-  },
-  mainContentDesktop: {
+  topBar: {
     flexDirection: "row",
     alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 24,
+  },
+  topCenter: { flex: 1, alignItems: "center" },
+  topLabel: { fontSize: 12, letterSpacing: 1, textTransform: "uppercase" },
+  moreBtn: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    alignItems: "center",
     justifyContent: "center",
+    backgroundColor: "rgba(255,255,255,0.08)",
+  },
+
+  mainLayout: { alignItems: "center" },
+  mainLayoutDesktop: {
+    flexDirection: "row",
+    alignItems: "flex-start",
     gap: 60,
-    paddingHorizontal: 60,
   },
 
   artWrapper: {
     shadowColor: "#000",
-    shadowOffset: { width: 0, height: 20 },
-    shadowOpacity: 0.6,
-    shadowRadius: 30,
-    elevation: 20,
-    marginTop: 20,
-    marginBottom: 32,
+    shadowOffset: { width: 0, height: 24 },
+    shadowOpacity: 0.7,
+    shadowRadius: 36,
+    elevation: 24,
+    marginBottom: 36,
+    alignItems: "center",
   },
-  artWrapperDesktop: {
-    marginTop: 0,
-    marginBottom: 0,
-    flexShrink: 0,
-  },
-
-  controlsSection: {
-    width: "100%",
-    gap: 0,
-  },
-  controlsSectionDesktop: {
-    flex: 1,
-    maxWidth: 420,
-    gap: 0,
+  swipeHint: {
+    fontSize: 11,
+    letterSpacing: 0.5,
+    marginTop: 12,
+    textTransform: "uppercase",
   },
 
-  songInfo: {
-    gap: 6,
-    marginBottom: 28,
-  },
-  songTitle: { fontSize: 26 },
-  songArtist: { fontSize: 16 },
+  controlsCol: { width: "100%" },
+  controlsColDesktop: { flex: 1, maxWidth: 440 },
 
-  progressSection: { marginBottom: 32 },
-  progressBarTouchable: { paddingVertical: 10 },
-  progressTrack: {
-    height: 4,
-    borderRadius: 2,
-    position: "relative",
-    overflow: "visible",
+  songInfoRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    marginBottom: 24,
   },
-  progressFill: {
-    height: 4,
-    borderRadius: 2,
-    backgroundColor: "#fff",
+  songTitle: { fontSize: 24, lineHeight: 30 },
+  songArtist: { fontSize: 15, marginTop: 4 },
+  heartBtn: { padding: 6 },
+
+  // Waveform
+  waveformTouchable: { paddingVertical: 8, marginBottom: 4 },
+  waveform: {
+    flexDirection: "row",
+    alignItems: "flex-end",
+    height: 36,
+    gap: 2,
   },
-  progressThumb: {
-    position: "absolute",
-    top: -7,
-    marginLeft: -8,
-    width: 18,
-    height: 18,
-    borderRadius: 9,
-    backgroundColor: "#fff",
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.3,
-    shadowRadius: 4,
-    elevation: 4,
-  },
+  waveBar: { flex: 1, minWidth: 2 },
+
   timeRow: {
     flexDirection: "row",
     justifyContent: "space-between",
-    marginTop: 10,
+    marginBottom: 28,
   },
   timeText: { fontSize: 12 },
 
+  // Controls
   controls: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    marginBottom: 32,
+    marginBottom: 28,
   },
-  playBtnGrad: {
-    width: 72,
-    height: 72,
-    borderRadius: 36,
+  activeDot: {
+    width: 4,
+    height: 4,
+    borderRadius: 2,
+    alignSelf: "center",
+    marginTop: 3,
+  },
+  playBtn: {
+    width: 70,
+    height: 70,
+    borderRadius: 35,
     alignItems: "center",
     justifyContent: "center",
     shadowColor: "#a855f7",
@@ -412,23 +686,128 @@ const styles = StyleSheet.create({
     shadowRadius: 16,
     elevation: 12,
   },
-  repeatBadge: {
+  repeatOneContainer: { position: "relative" },
+  repeatOneBadge: {
     position: "absolute",
-    bottom: -9,
-    right: -2,
-  },
-  repeatBadgeText: { fontSize: 9, fontWeight: "700" },
-
-  volumeRow: {
-    flexDirection: "row",
+    top: -4,
+    right: -6,
+    width: 14,
+    height: 14,
+    borderRadius: 7,
     alignItems: "center",
-    gap: 12,
+    justifyContent: "center",
   },
-  volumeTrackTouch: { flex: 1 },
-  volumeTrack: {
-    height: 4,
-    borderRadius: 2,
+  repeatOneText: { fontSize: 8, fontWeight: "700" },
+
+  // Action bar
+  actionBar: {
+    flexDirection: "row",
+    justifyContent: "space-around",
+    marginTop: 20,
+    paddingTop: 20,
+    borderTopWidth: 1,
+    borderTopColor: "rgba(255,255,255,0.08)",
+  },
+  actionBtn: { alignItems: "center", gap: 6 },
+  actionLabel: { fontSize: 10, letterSpacing: 0.3 },
+  speedBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 8,
+    borderWidth: 1,
+  },
+  speedText: { fontSize: 12 },
+  timerBadge: {
+    position: "absolute",
+    top: -5,
+    right: -7,
+    width: 14,
+    height: 14,
+    borderRadius: 7,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  timerBadgeText: { fontSize: 8 },
+
+  // Modals
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.75)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  menuCard: {
+    width: "80%",
+    maxWidth: 320,
+    borderRadius: 20,
     overflow: "hidden",
   },
-  volumeFill: { height: 4, borderRadius: 2 },
+  menuItem: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 14,
+    paddingHorizontal: 22,
+    paddingVertical: 16,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: "rgba(255,255,255,0.08)",
+  },
+  menuItemText: { fontSize: 15 },
+
+  pickerCard: {
+    width: "85%",
+    maxWidth: 360,
+    borderRadius: 22,
+    padding: 24,
+    gap: 16,
+  },
+  pickerTitle: { fontSize: 18, textAlign: "center" },
+  pickerSub: { fontSize: 13, textAlign: "center", marginTop: -8 },
+
+  speedGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 10,
+    justifyContent: "center",
+  },
+  speedOption: {
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    borderRadius: 14,
+    borderWidth: 1,
+    minWidth: 90,
+    alignItems: "center",
+  },
+  speedOptionText: { fontSize: 14 },
+
+  sleepOption: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 14,
+    padding: 16,
+    borderRadius: 14,
+    borderWidth: 1,
+    marginBottom: 2,
+  },
+  sleepOptionText: { fontSize: 15, flex: 1 },
+
+  sheetCard: {
+    position: "absolute",
+    bottom: 0,
+    left: 0,
+    right: 0,
+    borderTopLeftRadius: 28,
+    borderTopRightRadius: 28,
+    padding: 24,
+  },
+  sheetHandle: { alignItems: "center", marginBottom: 16 },
+  handle: { width: 36, height: 4, borderRadius: 2 },
+
+  playlistOption: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 14,
+    paddingVertical: 16,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  playlistOptionText: { fontSize: 15, flex: 1 },
 });

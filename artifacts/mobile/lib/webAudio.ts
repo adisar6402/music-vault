@@ -94,6 +94,12 @@ export class WebAudioPlayer {
     }
   }
 
+  async setPlaybackRate(rate: number): Promise<void> {
+    if (this.audio) {
+      this.audio.playbackRate = rate;
+    }
+  }
+
   async unload(): Promise<void> {
     if (this.pollInterval) {
       clearInterval(this.pollInterval);
