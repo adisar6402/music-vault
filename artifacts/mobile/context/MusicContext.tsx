@@ -84,6 +84,7 @@ interface MusicContextType {
   setPlaybackSpeed: (speed: number) => Promise<void>;
   setSleepTimer: (minutes: number | null) => void;
   jumpToQueueIndex: (idx: number) => Promise<void>;
+  addSongsDirect: (newSongs: Song[]) => void;
 }
 
 const MusicContext = createContext<MusicContextType | null>(null);
@@ -496,6 +497,18 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
     });
   }, []);
 
+  // Used by DropZone to inject songs that were already stored
+  const addSongsDirect = useCallback((newSongs: Song[]) => {
+    setSongs((prev) => {
+      const dedupedIds = new Set(prev.map((s) => s.id));
+      const fresh = newSongs.filter((s) => !dedupedIds.has(s.id));
+      if (fresh.length === 0) return prev;
+      const updated = [...fresh, ...prev];
+      saveToStorage(SONGS_KEY, updated);
+      return updated;
+    });
+  }, []);
+
   useEffect(() => { return () => { unloadAudio(); }; }, [unloadAudio]);
 
   return (
@@ -509,6 +522,7 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
       playSong, pauseResume, playNext, playPrev,
       toggleShuffle, toggleRepeat, seekTo, setVolumeLevel,
       setCurrentMood, setPlaybackSpeed, setSleepTimer, jumpToQueueIndex,
+      addSongsDirect,
     }}>
       {children}
     </MusicContext.Provider>

@@ -13,6 +13,7 @@ import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { KeyboardProvider } from "react-native-keyboard-controller";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 
+import { DropZone } from "@/components/DropZone";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { MusicProvider } from "@/context/MusicContext";
 
@@ -64,9 +65,10 @@ export default function RootLayout() {
       <ErrorBoundary>
         <QueryClientProvider client={queryClient}>
           <MusicProvider>
-            <GestureHandlerRootView>
+            <GestureHandlerRootView style={{ flex: 1 }}>
               <KeyboardProvider>
                 <RootLayoutNav />
+                <DropZone />
               </KeyboardProvider>
             </GestureHandlerRootView>
           </MusicProvider>
