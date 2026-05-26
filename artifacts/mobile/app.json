@@ -1,36 +1,46 @@
 {
   "expo": {
-    "name": "MusicVault",
-    "slug": "mobile",
+    "name": "Music Vault",
+    "slug": "music-vault",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
-    "scheme": "mobile",
+    "scheme": "musicvault",
     "userInterfaceStyle": "dark",
     "backgroundColor": "#000000",
+
     "newArchEnabled": true,
+
     "splash": {
       "image": "./assets/images/icon.png",
       "resizeMode": "contain",
       "backgroundColor": "#000000"
     },
+
     "ios": {
       "supportsTablet": false,
       "infoPlist": {
         "UIBackgroundModes": ["audio"]
       }
     },
+
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/icon.png",
         "backgroundColor": "#000000"
       }
     },
+
     "web": {
       "favicon": "./assets/images/icon.png",
       "bundler": "metro",
-      "output": "static"
+      "output": "static",
+      "name": "Music Vault",
+      "shortName": "MusicVault",
+      "themeColor": "#000000",
+      "backgroundColor": "#000000"
     },
+
     "plugins": [
       [
         "expo-router",
@@ -47,6 +57,7 @@
         }
       ]
     ],
+
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true

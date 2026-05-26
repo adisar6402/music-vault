@@ -12,6 +12,7 @@ import React, { useEffect } from "react";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { KeyboardProvider } from "react-native-keyboard-controller";
 import { SafeAreaProvider } from "react-native-safe-area-context";
+import { Platform } from "react-native";
 
 import { DropZone } from "@/components/DropZone";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
@@ -57,6 +58,37 @@ export default function RootLayout() {
       SplashScreen.hideAsync();
     }
   }, [fontsLoaded, fontError]);
+
+  // ✅ SEO + OPEN GRAPH (WEB ONLY FIXED)
+  useEffect(() => {
+    if (Platform.OS === "web") {
+      document.title = "Music Vault 🎧";
+
+      const metaTags = [
+        { name: "description", content: "Offline music vault. Play, save, and enjoy music anywhere." },
+
+        // Open Graph (FIXED PATH)
+        { property: "og:title", content: "Music Vault 🎧" },
+        { property: "og:description", content: "Offline music vault. Play, save, and enjoy music anywhere." },
+        { property: "og:image", content: "/assets/images/og-image.png" },
+        { property: "og:type", content: "website" },
+
+        // Twitter
+        { name: "twitter:card", content: "summary_large_image" },
+        { name: "twitter:title", content: "Music Vault 🎧" },
+        { name: "twitter:description", content: "Offline music experience built for everyone." },
+        { name: "twitter:image", content: "/assets/images/og-image.png" },
+      ];
+
+      metaTags.forEach((tag) => {
+        const meta = document.createElement("meta");
+        Object.entries(tag).forEach(([key, value]) => {
+          meta.setAttribute(key, value);
+        });
+        document.head.appendChild(meta);
+      });
+    }
+  }, []);
 
   if (!fontsLoaded && !fontError) return null;
 
